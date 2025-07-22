@@ -104,3 +104,92 @@
   (match (map-get? beneficiaries { id: id })
     beneficiary (ok beneficiary)
     ERR-BENEFICIARY-NOT-FOUND))
+
+
+(define-public (donate (beneficiary-id uint) (amount uint))
+  (let 
+    ((beneficiary (unwrap! (get-beneficiary beneficiary-id) ERR-BENEFICIARY-NOT-FOUND)))
+    (if (and (> amount u0)
+             (< beneficiary-id (var-get beneficiary-count))  ;; Check if beneficiary-id is valid
+             (is-some (map-get? beneficiaries { id: beneficiary-id })))
+        (match (stx-transfer? amount tx-sender (as-contract tx-sender))
+          success (begin
+            (map-set beneficiaries
+              { id: beneficiary-id }
+              (merge beneficiary { received-amount: (+ (get received-amount beneficiary) amount) }))
+            (map-set donations
+              { id: (+ (var-get donation-count) u1) }
+              { donor: tx-sender, beneficiary-id: beneficiary-id, amount: amount, timestamp: stacks-block-height })
+            (var-set donation-count (+ (var-get donation-count) u1))
+            (ok true))
+          error ERR-INSUFFICIENT-FUNDS)
+        ERR-INVALID-INPUT)))
+
+(define-public (add-utilization (beneficiary-id uint) (description (string-utf8 255)) (amount uint))
+  (let 
+    ((beneficiary (unwrap! (get-beneficiary beneficiary-id) ERR-BENEFICIARY-NOT-FOUND)))
+    (if (and (is-authorized tx-sender ROLE-ADMIN)
+             (> (len description) u0)
+             (> amount u0)
+             (< beneficiary-id (var-get beneficiary-count)))  ;; Check if beneficiary-id is valid
+        (let
+          ((milestone (+ (get-last-milestone beneficiary-id) u1))
+           (utilization-id (+ (var-get utilization-count) u1)))
+          (begin
+            (map-set utilization
+              { id: utilization-id }
+              { 
+                beneficiary-id: beneficiary-id, 
+                milestone: milestone, 
+                description: description, 
+                amount: amount, 
+                status: "pending" 
+              })
+            (var-set utilization-count utilization-id)
+            (ok milestone)))
+        ERR-INVALID-INPUT)))
+
+(define-public (approve-utilization (beneficiary-id uint) (milestone uint))
+  (let 
+    ((utilization-entry (unwrap! (map-get? utilization { id: milestone }) ERR-UTILIZATION-NOT-FOUND))
+     (beneficiary (unwrap! (get-beneficiary beneficiary-id) ERR-BENEFICIARY-NOT-FOUND)))
+    (if (and (is-authorized tx-sender ROLE-ADMIN)
+             (is-eq (get beneficiary-id utilization-entry) beneficiary-id)
+             (< beneficiary-id (var-get beneficiary-count))  ;; Check if beneficiary-id is valid
+             (< milestone (var-get utilization-count)))  ;; Check if milestone is valid
+        (if (<= (get amount utilization-entry) (get received-amount beneficiary))
+            (begin
+              (map-set utilization
+                { id: milestone }
+                (merge utilization-entry { status: "approved" }))
+              (ok true))
+            ERR-INSUFFICIENT-FUNDS)
+        ERR-NOT-AUTHORIZED)))
+
+;; Get a single donation by ID
+(define-read-only (get-donation-by-id (donation-id uint))
+  (match (map-get? donations { id: donation-id })
+    donation (ok donation)
+    ERR-NOT-FOUND))
+
+;; Get a single utilization entry by ID
+(define-read-only (get-utilization-by-id (utilization-id uint))
+  (match (map-get? utilization { id: utilization-id })
+    util (ok util)
+    ERR-NOT-FOUND))
+
+;; Get the total number of donations
+(define-read-only (get-donation-count)
+  (ok (var-get donation-count)))
+
+;; Get the total number of utilization entries
+(define-read-only (get-utilization-count)
+  (ok (var-get utilization-count)))
+
+;; Contract initialization
+(define-private (initialize-contract)
+  (begin
+    (map-set roles { user: tx-sender } { role: ROLE-ADMIN })
+    (var-set contract-owner tx-sender)))
+
+(initialize-contract)
